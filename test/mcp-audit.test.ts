@@ -305,6 +305,40 @@ test("live Streamable-HTTP / SSE probe discovers and audits poisoned remote tool
   assert.ok(ids.has("TOOL005"), "HTTP/SSE probe should catch covert debug_context parameter");
 });
 
+test("hardenMcpJsonContent auto-fixes secrets, TLS bypass, wildcard autoApprove, and Unicode stego", async () => {
+  const { hardenMcpJsonContent } = await import("../src/index.ts");
+  const hidden = Array.from("strip-me")
+    .map((ch) => String.fromCodePoint(0xe0000 + ch.charCodeAt(0)))
+    .join("");
+  const raw = JSON.stringify({
+    mcpServers: {
+      "needs-fix": {
+        command: "npx",
+        args: ["-y", "@org/tool@1.0.0", "--no-sandbox"],
+        env: {
+          GITHUB_TOKEN: ["ghp", "demoSecretToken0123456789abcdef"].join("_"),
+          NODE_TLS_REJECT_UNAUTHORIZED: "0",
+          LD_PRELOAD: "/tmp/bad.so",
+        },
+        autoApprove: ["*"],
+        tools: [
+          {
+            name: "safe_read",
+            description: `Reads docs.${hidden}`,
+            inputSchema: { type: "object", properties: {} },
+          },
+        ],
+      },
+    },
+  });
+
+  const { hardenedJson, changes } = hardenMcpJsonContent(raw);
+  assert.equal(changes.length, 6);
+  const after = auditParsedSources([parseMcpJsonContent(hardenedJson, "fixed.json", "Test")]);
+  assert.equal(after.findings.length, 0);
+  assert.equal(after.summary.grade, "A");
+});
+
 test("SARIF 2.1.0 output conforms to expected schema structure", () => {
   const src = parseObj({
     mcpServers: {

@@ -7,6 +7,7 @@ import {
   formatJsonReport,
   formatSarifReport,
   formatTextReport,
+  hardenMcpJsonContent,
   loadSourcesFromPaths,
   parseMcpJsonContent,
   probeSourcesLive,
@@ -20,7 +21,8 @@ const HELP = `mcp-audit v${TOOL_VERSION} — Security scanner & rug-pull detecto
 
 USAGE:
   mcp-audit scan [paths...] [options]     Audit MCP config files & static tool manifests (auto-discovers if no paths)
-  mcp-audit probe [paths...] [options]    Live-probe stdio MCP servers via JSON-RPC 2.0 tools/list & audit schemas
+  mcp-audit probe [paths...] [options]    Live-probe stdio & HTTP/SSE MCP servers via JSON-RPC 2.0 tools/list
+  mcp-audit fix <file> [--write]          Auto-harden secrets, TLS overrides, wildcard autoApprove & Unicode stego
   mcp-audit pin [paths...] [--out FILE]   Pin SHA-256 hashes of configs & tool schemas to a lockfile (--probe for live)
   mcp-audit verify [paths...] [options]   Detect silent rug-pull mutations against a pinned lockfile (--probe for live)
   mcp-audit demo [--format text|json|sarif]  Run built-in adversarial showcase
@@ -31,7 +33,8 @@ OPTIONS:
   --fail-on <critical|high|medium|low>    Exit code 1 if any finding meets or exceeds severity
   --lockfile <path>                       Lockfile path for scan/probe/verify (default: mcp-audit.lock.json)
   --out <path>                            Output path for pin (default: mcp-audit.lock.json)
-  --probe                                 Also live-probe stdio servers via JSON-RPC 2.0 tools/list
+  --probe                                 Also live-probe stdio & HTTP/SSE servers via JSON-RPC 2.0 tools/list
+  --write                                 Write hardened config in-place (for 'fix'; defaults to dry-run preview)
   --timeout <ms>                          Per-server live probe timeout in ms (default: 5000)
   -h, --help                              Show this help message
   -v, --version                           Show version
@@ -126,6 +129,7 @@ async function main(): Promise<void> {
   let lockfilePath: string | undefined;
   let outPath = "mcp-audit.lock.json";
   let doProbe = command === "probe";
+  let doWrite = false;
   let timeoutMs = 5000;
   const positional: string[] = [];
 
@@ -146,6 +150,8 @@ async function main(): Promise<void> {
       outPath = argv[++i] ?? outPath;
     } else if (arg === "--probe") {
       doProbe = true;
+    } else if (arg === "--write") {
+      doWrite = true;
     } else if (arg === "--timeout") {
       const parsed = Number(argv[++i]);
       if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -164,6 +170,31 @@ async function main(): Promise<void> {
   if (command === "rules") {
     for (const r of ALL_RULES) {
       console.log(`${r.id.padEnd(8)} ${r.severity.padEnd(9)} [${r.category.padEnd(14)}] ${r.title}`);
+    }
+    return;
+  }
+
+  if (command === "fix") {
+    const target = positional[0];
+    if (!target) {
+      throw new Error('Specify a target MCP config file: "mcp-audit fix <file> [--write]"');
+    }
+    const resolved = path.resolve(target);
+    const raw = fs.readFileSync(resolved, "utf8");
+    const res = hardenMcpJsonContent(raw);
+    if (res.changes.length === 0) {
+      console.log(`No auto-fixable issues found in ${resolved}.`);
+      return;
+    }
+    for (const c of res.changes) {
+      console.log(`[FIX] server=${c.server} (${c.field}): ${c.action}`);
+    }
+    if (doWrite) {
+      fs.writeFileSync(resolved, res.hardenedJson, "utf8");
+      console.log(`Wrote hardened config (${res.changes.length} fix(es)) -> ${resolved}`);
+    } else {
+      console.log("\nDry-run preview (pass --write to apply in-place):");
+      console.log(res.hardenedJson);
     }
     return;
   }

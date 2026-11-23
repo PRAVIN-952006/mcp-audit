@@ -34,15 +34,33 @@ node src/cli.ts scan
 # 3. Live-probe stdio MCP servers via JSON-RPC 2.0 tools/list and fail CI on HIGH+ findings
 node src/cli.ts probe .cursor/mcp.json --fail-on high
 
-# 4. Pin SHA-256 hashes of live tool schemas (safe to commit to Git)
+# 4. Auto-harden hardcoded secrets, TLS bypasses, wildcard autoApprove & Unicode stego (dry-run by default)
+node src/cli.ts fix .cursor/mcp.json
+node src/cli.ts fix .cursor/mcp.json --write
+
+# 5. Pin SHA-256 hashes of live tool schemas (safe to commit to Git)
 node src/cli.ts pin .cursor/mcp.json --probe --out mcp-audit.lock.json
 
-# 5. Detect silent rug-pull mutations in CI or before launching your agent
+# 6. Detect silent rug-pull mutations in CI or before launching your agent
 node src/cli.ts verify .cursor/mcp.json --probe --lockfile mcp-audit.lock.json
 
-# 6. Export SARIF 2.1.0 for GitHub Code Scanning
+# 7. Export SARIF 2.1.0 for GitHub Code Scanning
 node src/cli.ts scan .cursor/mcp.json --format sarif > mcp-audit.sarif
 ```
+
+---
+
+### How `mcp-audit` Compares
+
+| Capability | `mcp-audit` | Cloud / API-Backed Scanners | Runtime Proxy Wrappers |
+| :--- | :---: | :---: | :---: |
+| **Runtime dependencies** | **0** (Node.js built-ins only) | Heavy Python/JS dependency tree | Proxy daemon required |
+| **100% offline / zero telemetry** | Yes | Often sends tool schemas to external APIs | Local proxy |
+| **Static config + Live `stdio` & HTTP/SSE probing** | Yes (`scan` + `probe`) | Varies | Runtime only |
+| **Unicode Tag (`U+E0000`) payload decoding** | Yes (decodes hidden ASCII) | Partial / detection only | Rarely |
+| **Auto-hardening (`fix` dry-run / `--write`)** | Yes | No | No |
+| **Git-committable SHA-256 rug-pull lockfile** | Yes (no secret values written) | Local cache only | Local state |
+| **GitHub Marketplace Action + SARIF 2.1.0** | Yes (`action.yml`) | Manual CI setup | Not for CI |
 
 ---
 

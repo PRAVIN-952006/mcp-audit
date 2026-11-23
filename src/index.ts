@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getDefaultDiscoveryCandidates, loadMcpFile, parseMcpJsonContent } from "./discover.ts";
+import { hardenMcpJsonContent, type HardenChange, type HardenResult } from "./harden.ts";
 import { buildLockfile, RUGPULL_RULES, verifyAgainstLockfile } from "./lockfile.ts";
 import { probeHttpServer, probeStdioServer, type ProbeResult } from "./probe.ts";
 import { formatJsonReport, formatSarifReport, formatTextReport } from "./reporters.ts";
@@ -18,7 +19,7 @@ import {
   type Severity,
 } from "./types.ts";
 
-export const TOOL_VERSION = "0.3.0";
+export const TOOL_VERSION = "0.4.0";
 
 export const ALL_RULES: RuleMetadata[] = [...CONFIG_RULES, ...TOOL_RULES, ...RUGPULL_RULES];
 
@@ -28,13 +29,14 @@ export {
   formatSarifReport,
   formatTextReport,
   getDefaultDiscoveryCandidates,
+  hardenMcpJsonContent,
   loadMcpFile,
   parseMcpJsonContent,
   probeHttpServer,
   probeStdioServer,
   verifyAgainstLockfile,
 };
-export type { ProbeResult };
+export type { HardenChange, HardenResult, ProbeResult };
 export type * from "./types.ts";
 
 function computeGrade(score: number): AuditSummary["grade"] {
