@@ -1,5 +1,5 @@
-name: "mcp-audit"
-description: "Zero-dependency security scanner, live MCP prober, and SHA-256 rug-pull detector for Model Context Protocol (MCP) configs and tool schemas."
+name: "MCP Audit Security Scanner"
+description: "Zero-dep MCP security scanner, live tool-schema prober, Unicode stego decoder, and SHA-256 rug-pull detector."
 author: "Pravin G"
 branding:
   icon: "shield"
