@@ -4,6 +4,8 @@
 
 ![mcp-audit demo](assets/demo.svg)
 
+> **Empirical Ecosystem Check (Nov 2026):** Auditing parseable `README.md` install configs across top-starred public MCP servers on GitHub (`>1k` stars), **66.7% (8/12)** recommend unpinned ephemeral `npx -y` / `uvx` runners (`MCP001`)—meaning an upstream package takeover or silent tool-schema rug-pull executes on next restart. See the full reproducible table in [`docs/ECOSYSTEM_AUDIT.md`](docs/ECOSYSTEM_AUDIT.md).
+
 AI coding agents and desktop assistants (Claude Desktop, Cursor, VS Code, Claude Code, Windsurf) load local and remote MCP servers directly from JSON configs—and inject every server's tool descriptions straight into the model's context window. `mcp-audit` catches **tool poisoning**, **invisible Unicode Tag steganography** (with automatic payload decoding), **cross-server tool shadowing**, **hardcoded credentials**, **over-privileged mounts**, and **silent rug-pull schema mutations** in milliseconds.
 
 ---
