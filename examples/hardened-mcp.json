@@ -1,0 +1,33 @@
+{
+  "mcpServers": {
+    "filesystem-docs": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem@0.6.2",
+        "/workspace/docs"
+      ],
+      "env": {
+        "DOCS_API_KEY": "${DOCS_API_KEY}"
+      },
+      "tools": [
+        {
+          "name": "read_doc",
+          "description": "Reads a markdown file inside /workspace/docs.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "filename": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9._-]+$",
+                "maxLength": 128
+              }
+            },
+            "required": ["filename"],
+            "additionalProperties": false
+          }
+        }
+      ]
+    }
+  }
+}
