@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="430" viewBox="0 0 880 430" role="img" aria-label="mcp-audit terminal demo">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0d1117"/>
+      <stop offset="100%" stop-color="#161b22"/>
+    </linearGradient>
+  </defs>
+  <rect width="880" height="430" rx="12" fill="url(#bg)" stroke="#30363d" stroke-width="1.5"/>
+  <!-- Window bar -->
+  <rect width="880" height="36" rx="12" fill="#161b22"/>
+  <rect y="24" width="880" height="12" fill="#161b22"/>
+  <circle cx="22" cy="18" r="6" fill="#ff5f56"/>
+  <circle cx="42" cy="18" r="6" fill="#ffbd2e"/>
+  <circle cx="62" cy="18" r="6" fill="#27c93f"/>
+  <text x="440" y="22" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" text-anchor="middle">mcp-audit v0.3.0 — Zero-Dependency MCP Security Scanner</text>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13">
+    <text x="24" y="66" fill="#7ee787">$ mcp-audit demo</text>
+    <text x="24" y="92" fill="#58a6ff" font-weight="bold">mcp-audit v0.3.0</text>
+    <text x="160" y="92" fill="#8b949e">— MCP Server &amp; Tool-Schema Security Report</text>
+    <text x="24" y="114" fill="#c9d1d9">Scanned 1 file(s), 2 server(s), 3 tool(s)</text>
+    <text x="24" y="136" fill="#c9d1d9">Grade: </text>
+    <text x="78" y="136" fill="#ff7b72" font-weight="bold">F</text>
+    <text x="95" y="136" fill="#8b949e"> | </text>
+    <text x="118" y="136" fill="#c9d1d9">Risk Score: 100/100</text>
+    <text x="275" y="136" fill="#8b949e"> | </text>
+    <text x="298" y="136" fill="#c9d1d9">Findings: 12 (4 critical, 7 high, 1 medium)</text>
+
+    <text x="24" y="172" fill="#ff7b72" font-weight="bold">[CRITICAL]</text>
+    <text x="114" y="172" fill="#f0f6fc" font-weight="bold">MCP002</text>
+    <text x="174" y="172" fill="#c9d1d9">Hardcoded GitHub token in env (server=unpinned-fs)</text>
+
+    <text x="24" y="202" fill="#ff7b72" font-weight="bold">[CRITICAL]</text>
+    <text x="114" y="202" fill="#f0f6fc" font-weight="bold">TOOL001</text>
+    <text x="182" y="202" fill="#c9d1d9">Tool poisoning (hidden XML instruction tag) in read_notes</text>
+
+    <text x="24" y="232" fill="#ff7b72" font-weight="bold">[CRITICAL]</text>
+    <text x="114" y="232" fill="#f0f6fc" font-weight="bold">TOOL002</text>
+    <text x="182" y="232" fill="#c9d1d9">Invisible Unicode Tag steganography in send_email</text>
+    <text x="40" y="252" fill="#d2a8ff">Proof : 16 hidden U+E0000 chars | decoded payload: "hidden-tag-check"</text>
+
+    <text x="24" y="282" fill="#ffa657" font-weight="bold">[HIGH    ]</text>
+    <text x="114" y="282" fill="#f0f6fc" font-weight="bold">MCP001</text>
+    <text x="174" y="282" fill="#c9d1d9">Unpinned npx -y @modelcontextprotocol/server-filesystem</text>
+
+    <text x="24" y="312" fill="#ffa657" font-weight="bold">[HIGH    ]</text>
+    <text x="114" y="312" fill="#f0f6fc" font-weight="bold">TOOL004</text>
+    <text x="182" y="312" fill="#c9d1d9">Cross-server tool collision: "send_email" (unpinned-fs vs shadow-mailer)</text>
+
+    <text x="24" y="342" fill="#ffa657" font-weight="bold">[HIGH    ]</text>
+    <text x="114" y="342" fill="#f0f6fc" font-weight="bold">RUG001</text>
+    <text x="174" y="342" fill="#c9d1d9">SHA-256 rug-pull lockfile verification catches silent schema mutations</text>
+
+    <text x="24" y="384" fill="#7ee787">$ mcp-audit probe .cursor/mcp.json --fail-on high --format sarif &gt; mcp.sarif</text>
+    <text x="24" y="406" fill="#8b949e">Live stdio + Streamable-HTTP/SSE probing  •  20 rules  •  0 dependencies  •  SARIF 2.1.0</text>
+  </g>
+</svg>

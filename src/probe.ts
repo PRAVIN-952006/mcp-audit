@@ -3,6 +3,7 @@ import type { McpServerConfig, McpToolDefinition } from "./types.ts";
 
 export interface ProbeResult {
   server: string;
+  transport: "stdio" | "http";
   tools: McpToolDefinition[];
   protocolVersion?: string;
   error?: string;
@@ -38,6 +39,136 @@ function extractToolsFromResult(result: Record<string, unknown>): McpToolDefinit
   return out;
 }
 
+function parseRpcPayload(text: string, contentType: string): JsonRpcResponse | undefined {
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  if (contentType.includes("text/event-stream") || trimmed.startsWith("event:") || trimmed.startsWith("data:")) {
+    for (const line of trimmed.split(/\r?\n/)) {
+      if (line.startsWith("data:")) {
+        const data = line.slice(5).trim();
+        if (data.startsWith("{")) {
+          try {
+            return JSON.parse(data) as JsonRpcResponse;
+          } catch {
+            // continue scanning SSE frames
+          }
+        }
+      }
+    }
+    return undefined;
+  }
+  return JSON.parse(trimmed) as JsonRpcResponse;
+}
+
+/**
+ * Probes a remote Streamable-HTTP / SSE MCP server via JSON-RPC 2.0 (`initialize` -> `tools/list`).
+ */
+export async function probeHttpServer(
+  serverName: string,
+  config: McpServerConfig,
+  timeoutMs = 5000,
+  fetchImpl: typeof fetch = fetch
+): Promise<ProbeResult> {
+  if (!config.url) {
+    return { server: serverName, transport: "http", tools: [], error: "No remote URL configured" };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const baseHeaders: Record<string, string> = {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      ...(config.headers ?? {}),
+    };
+
+    const initRes = await fetchImpl(config.url, {
+      method: "POST",
+      headers: baseHeaders,
+      signal: controller.signal,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "mcp-audit", version: "0.3.0" },
+        },
+      }),
+    });
+
+    if (!initRes.ok) {
+      return {
+        server: serverName,
+        transport: "http",
+        tools: [],
+        error: `HTTP ${initRes.status} on initialize`,
+      };
+    }
+
+    const sessionId = initRes.headers.get("mcp-session-id");
+    const initPayload = parseRpcPayload(await initRes.text(), initRes.headers.get("content-type") ?? "");
+    if (initPayload?.error) {
+      return {
+        server: serverName,
+        transport: "http",
+        tools: [],
+        error: `initialize error: ${initPayload.error.message ?? "unknown"}`,
+      };
+    }
+
+    const protocolVersion =
+      initPayload?.result && typeof initPayload.result["protocolVersion"] === "string"
+        ? initPayload.result["protocolVersion"]
+        : undefined;
+
+    const sessionHeaders: Record<string, string> = sessionId
+      ? { ...baseHeaders, "mcp-session-id": sessionId }
+      : baseHeaders;
+
+    const listRes = await fetchImpl(config.url, {
+      method: "POST",
+      headers: sessionHeaders,
+      signal: controller.signal,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/list",
+        params: {},
+      }),
+    });
+
+    if (!listRes.ok) {
+      return {
+        server: serverName,
+        transport: "http",
+        tools: [],
+        error: `HTTP ${listRes.status} on tools/list`,
+      };
+    }
+
+    const listPayload = parseRpcPayload(await listRes.text(), listRes.headers.get("content-type") ?? "");
+    if (listPayload?.error) {
+      return {
+        server: serverName,
+        transport: "http",
+        tools: [],
+        error: `tools/list error: ${listPayload.error.message ?? "unknown"}`,
+      };
+    }
+
+    const tools = listPayload?.result ? extractToolsFromResult(listPayload.result) : [];
+    return { server: serverName, transport: "http", tools, protocolVersion };
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { server: serverName, transport: "http", tools: [], error: msg };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Probes a local stdio MCP server via standard JSON-RPC 2.0 (`initialize` -> `tools/list`)
  * using newline-delimited JSON framing with a strict timeout.
@@ -49,7 +180,7 @@ export function probeStdioServer(
 ): Promise<ProbeResult> {
   return new Promise((resolve) => {
     if (!config.command) {
-      resolve({ server: serverName, tools: [], error: "No stdio command configured" });
+      resolve({ server: serverName, transport: "stdio", tools: [], error: "No stdio command configured" });
       return;
     }
 
@@ -72,7 +203,7 @@ export function probeStdioServer(
     });
 
     const timer = setTimeout(() => {
-      finish({ server: serverName, tools: [], error: `Timed out after ${timeoutMs}ms` });
+      finish({ server: serverName, transport: "stdio", tools: [], error: `Timed out after ${timeoutMs}ms` });
     }, timeoutMs);
 
     let buffer = "";
@@ -89,6 +220,7 @@ export function probeStdioServer(
         if (msg.error) {
           finish({
             server: serverName,
+            transport: "stdio",
             tools: [],
             error: `initialize error: ${msg.error.message ?? "unknown"}`,
           });
@@ -103,13 +235,14 @@ export function probeStdioServer(
         if (msg.error) {
           finish({
             server: serverName,
+            transport: "stdio",
             tools: [],
             error: `tools/list error: ${msg.error.message ?? "unknown"}`,
           });
           return;
         }
         const tools = msg.result ? extractToolsFromResult(msg.result) : [];
-        finish({ server: serverName, tools, protocolVersion });
+        finish({ server: serverName, transport: "stdio", tools, protocolVersion });
       }
     };
 
@@ -132,12 +265,17 @@ export function probeStdioServer(
     });
 
     child.on("error", (err) => {
-      finish({ server: serverName, tools: [], error: err.message });
+      finish({ server: serverName, transport: "stdio", tools: [], error: err.message });
     });
 
     child.on("exit", (code) => {
       if (!settled) {
-        finish({ server: serverName, tools: [], error: `Server exited early (code ${code ?? "null"})` });
+        finish({
+          server: serverName,
+          transport: "stdio",
+          tools: [],
+          error: `Server exited early (code ${code ?? "null"})`,
+        });
       }
     });
 
@@ -148,7 +286,7 @@ export function probeStdioServer(
       params: {
         protocolVersion: "2024-11-05",
         capabilities: {},
-        clientInfo: { name: "mcp-audit", version: "0.1.0" },
+        clientInfo: { name: "mcp-audit", version: "0.3.0" },
       },
     });
   });

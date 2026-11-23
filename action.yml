@@ -1,0 +1,58 @@
+name: "mcp-audit"
+description: "Zero-dependency security scanner, live MCP prober, and SHA-256 rug-pull detector for Model Context Protocol (MCP) configs and tool schemas."
+author: "Pravin G"
+branding:
+  icon: "shield"
+  color: "red"
+
+inputs:
+  path:
+    description: "Path(s) to MCP config JSON file(s) or directory to audit (defaults to auto-discovery)."
+    required: false
+    default: ""
+  probe:
+    description: "Set to 'true' to live-probe stdio and Streamable-HTTP/SSE MCP servers via JSON-RPC 2.0."
+    required: false
+    default: "false"
+  lockfile:
+    description: "Optional path to mcp-audit.lock.json for SHA-256 rug-pull drift verification."
+    required: false
+    default: ""
+  fail-on:
+    description: "Minimum severity to fail the workflow (critical, high, medium, low)."
+    required: false
+    default: "high"
+  sarif-file:
+    description: "Optional output path to write a SARIF 2.1.0 report for GitHub Code Scanning."
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Run mcp-audit
+      shell: bash
+      run: |
+        CMD="scan"
+        if [ "${{ inputs.probe }}" = "true" ]; then
+          CMD="probe"
+        fi
+
+        ARGS=()
+        if [ -n "${{ inputs.path }}" ]; then
+          ARGS+=("${{ inputs.path }}")
+        fi
+        if [ -n "${{ inputs.lockfile }}" ]; then
+          ARGS+=("--lockfile" "${{ inputs.lockfile }}")
+        fi
+        if [ -n "${{ inputs.fail-on }}" ]; then
+          ARGS+=("--fail-on" "${{ inputs.fail-on }}")
+        fi
+
+        if [ -n "${{ inputs.sarif-file }}" ]; then
+          node "${{ github.action_path }}/src/cli.ts" "$CMD" "${ARGS[@]}" --format sarif > "${{ inputs.sarif-file }}" || EXIT_CODE=$?
+          node "${{ github.action_path }}/src/cli.ts" "$CMD" "${ARGS[@]}" || true
+          exit "${EXIT_CODE:-0}"
+        else
+          node "${{ github.action_path }}/src/cli.ts" "$CMD" "${ARGS[@]}"
+        fi

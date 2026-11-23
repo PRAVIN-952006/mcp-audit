@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getDefaultDiscoveryCandidates, loadMcpFile, parseMcpJsonContent } from "./discover.ts";
 import { buildLockfile, RUGPULL_RULES, verifyAgainstLockfile } from "./lockfile.ts";
-import { probeStdioServer, type ProbeResult } from "./probe.ts";
+import { probeHttpServer, probeStdioServer, type ProbeResult } from "./probe.ts";
 import { formatJsonReport, formatSarifReport, formatTextReport } from "./reporters.ts";
 import { auditServerConfig, CONFIG_RULES } from "./rules/config-rules.ts";
 import { auditToolsAcrossServers, TOOL_RULES, type ToolAuditInput } from "./rules/tool-rules.ts";
@@ -18,7 +18,7 @@ import {
   type Severity,
 } from "./types.ts";
 
-export const TOOL_VERSION = "0.2.0";
+export const TOOL_VERSION = "0.3.0";
 
 export const ALL_RULES: RuleMetadata[] = [...CONFIG_RULES, ...TOOL_RULES, ...RUGPULL_RULES];
 
@@ -30,6 +30,7 @@ export {
   getDefaultDiscoveryCandidates,
   loadMcpFile,
   parseMcpJsonContent,
+  probeHttpServer,
   probeStdioServer,
   verifyAgainstLockfile,
 };
@@ -51,8 +52,14 @@ export async function probeSourcesLive(
   const results: ProbeResult[] = [];
   for (const src of sources) {
     for (const [serverName, cfg] of Object.entries(src.servers)) {
-      if (cfg.disabled || !cfg.command) continue;
-      const res = await probeStdioServer(serverName, cfg, timeoutMs);
+      if (cfg.disabled) continue;
+      let res: ProbeResult | undefined;
+      if (cfg.command) {
+        res = await probeStdioServer(serverName, cfg, timeoutMs);
+      } else if (cfg.url) {
+        res = await probeHttpServer(serverName, cfg, timeoutMs);
+      }
+      if (!res) continue;
       results.push(res);
       if (res.tools.length > 0) {
         cfg.tools = res.tools;

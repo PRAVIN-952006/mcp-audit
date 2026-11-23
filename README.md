@@ -1,30 +1,17 @@
 # mcp-audit
 
-**Zero-dependency security scanner, live JSON-RPC 2.0 tool-schema prober, and cryptographic rug-pull detector for Model Context Protocol (MCP) servers.**
+**Zero-dependency security scanner, live stdio & Streamable-HTTP/SSE prober, and cryptographic rug-pull detector for Model Context Protocol (MCP) servers.**
 
-AI coding agents and desktop assistants (Claude Desktop, Cursor, VS Code, Claude Code, Windsurf) load local and remote MCP servers directly from JSON configs—and inject every server's tool descriptions straight into the model's context window. `mcp-audit` catches **tool poisoning**, **invisible Unicode Tag steganography** (with automatic payload decoding), **cross-server tool shadowing**, **hardcoded credentials**, **over-privileged mounts**, and **silent rug-pull schema mutations** in milliseconds, 100% offline.
+![mcp-audit demo](assets/demo.svg)
 
----
-
-### What It Catches (`mcp-audit demo`)
-
-```text
-mcp-audit v0.2.0 — MCP Server & Tool-Schema Security Report
-Scanned 1 file(s), 2 server(s), 3 tool(s)
-Grade: F  |  Risk Score: 100/100  |  Findings: 12 (4 critical, 7 high, 1 medium, 0 low)
-
-[CRITICAL] MCP002 Hardcoded GitHub token in env
-[CRITICAL] TOOL001 Tool poisoning (hidden XML instruction tag)
-[CRITICAL] TOOL002 Invisible Unicode steganography detected in tool schema
-  Proof  : tool.description: 16 hidden chars | decoded tag payload: "hidden-tag-check"
-[HIGH    ] TOOL004 Cross-server duplicate tool name collision (send_email)
-```
+AI coding agents and desktop assistants (Claude Desktop, Cursor, VS Code, Claude Code, Windsurf) load local and remote MCP servers directly from JSON configs—and inject every server's tool descriptions straight into the model's context window. `mcp-audit` catches **tool poisoning**, **invisible Unicode Tag steganography** (with automatic payload decoding), **cross-server tool shadowing**, **hardcoded credentials**, **over-privileged mounts**, and **silent rug-pull schema mutations** in milliseconds.
 
 ---
 
 ### Why `mcp-audit`?
 - **Zero runtime dependencies** (`"dependencies": {}`): pure Node.js built-ins + strict TypeScript—no supply-chain bloat.
-- **Live JSON-RPC 2.0 stdio probing (`mcp-audit probe`):** Spawns configured stdio MCP servers with a strict timeout, runs the `initialize` -> `tools/list` handshake, and audits the **live** tool schemas returned by the server.
+- **Live JSON-RPC 2.0 probing (`mcp-audit probe`):** Audits both **local `stdio`** servers and **remote Streamable-HTTP / SSE** MCP endpoints (`initialize` -> `Mcp-Session-Id` -> `tools/list`) with strict timeouts.
+- **Drop-in GitHub Action (`action.yml`):** Add 4 lines to any workflow to block poisoned MCP configs on pull requests and upload **SARIF 2.1.0** alerts to GitHub Security.
 - **20 built-in security rules** across 3 engines:
   - `MCP001`–`MCP008`: Static config security (unpinned `npx -y`/`uvx`, hardcoded secrets, plaintext HTTP/0.0.0.0, shell wrappers, root/`~/.ssh` mounts, `LD_PRELOAD`/`NODE_TLS_REJECT_UNAUTHORIZED=0`, temp binaries, wildcard `autoApprove`).
   - `TOOL001`–`TOOL008`: Tool-schema poisoning & steganography (hidden instruction override directives, Unicode Tag `U+E0000–E007F` & bidi/zero-width smuggling with automatic payload decoding, SSH/AWS/`.env` exfiltration directives, cross-server tool name collisions, covert `sidenote`/`debug_context` parameter traps, embedded webhooks, unconstrained destructive schemas, context-stuffing descriptions).
@@ -84,11 +71,15 @@ node src/cli.ts scan .cursor/mcp.json --format sarif > mcp-audit.sarif
 
 ---
 
-### GitHub Actions Integration
+### GitHub Actions Integration (Drop-In Action)
 
 ```yaml
 - name: Audit MCP configs
-  run: npx mcp-audit scan .cursor/mcp.json --format sarif --fail-on high > mcp-audit.sarif
+  uses: PRAVIN-952006/mcp-audit@main
+  with:
+    path: .cursor/mcp.json
+    fail-on: high
+    sarif-file: mcp-audit.sarif
 
 - name: Upload SARIF to GitHub Security
   if: always()
