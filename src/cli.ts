@@ -9,6 +9,7 @@ import {
   formatTextReport,
   loadSourcesFromPaths,
   parseMcpJsonContent,
+  probeSourcesLive,
   shouldFailBuild,
   TOOL_VERSION,
   type Lockfile,
@@ -18,17 +19,20 @@ import {
 const HELP = `mcp-audit v${TOOL_VERSION} — Security scanner & rug-pull detector for MCP servers and tool schemas
 
 USAGE:
-  mcp-audit scan [paths...] [options]     Audit MCP config files & tool manifests (auto-discovers if no paths)
-  mcp-audit pin [paths...] [--out FILE]   Pin SHA-256 hashes of configs & tool schemas to a lockfile
-  mcp-audit verify [paths...] [options]   Detect silent rug-pull mutations against a pinned lockfile
+  mcp-audit scan [paths...] [options]     Audit MCP config files & static tool manifests (auto-discovers if no paths)
+  mcp-audit probe [paths...] [options]    Live-probe stdio MCP servers via JSON-RPC 2.0 tools/list & audit schemas
+  mcp-audit pin [paths...] [--out FILE]   Pin SHA-256 hashes of configs & tool schemas to a lockfile (--probe for live)
+  mcp-audit verify [paths...] [options]   Detect silent rug-pull mutations against a pinned lockfile (--probe for live)
   mcp-audit demo [--format text|json|sarif]  Run built-in adversarial showcase
   mcp-audit rules                         List all 20 built-in security rules (MCP / TOOL / RUG)
 
 OPTIONS:
   --format <text|json|sarif>              Output format (default: text)
   --fail-on <critical|high|medium|low>    Exit code 1 if any finding meets or exceeds severity
-  --lockfile <path>                       Lockfile path for scan/verify (default: mcp-audit.lock.json)
+  --lockfile <path>                       Lockfile path for scan/probe/verify (default: mcp-audit.lock.json)
   --out <path>                            Output path for pin (default: mcp-audit.lock.json)
+  --probe                                 Also live-probe stdio servers via JSON-RPC 2.0 tools/list
+  --timeout <ms>                          Per-server live probe timeout in ms (default: 5000)
   -h, --help                              Show this help message
   -v, --version                           Show version
 `;
@@ -105,7 +109,7 @@ function buildDemoSources() {
   return [parseMcpJsonContent(JSON.stringify(demoConfig), "demo://adversarial-mcp.json", "Demo")];
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (argv.length === 0 || argv.includes("-h") || argv.includes("--help")) {
     console.log(HELP);
@@ -121,6 +125,8 @@ function main(): void {
   let failOn: Severity | undefined;
   let lockfilePath: string | undefined;
   let outPath = "mcp-audit.lock.json";
+  let doProbe = command === "probe";
+  let timeoutMs = 5000;
   const positional: string[] = [];
 
   for (let i = 1; i < argv.length; i++) {
@@ -138,6 +144,14 @@ function main(): void {
       lockfilePath = argv[++i];
     } else if (arg === "--out") {
       outPath = argv[++i] ?? outPath;
+    } else if (arg === "--probe") {
+      doProbe = true;
+    } else if (arg === "--timeout") {
+      const parsed = Number(argv[++i]);
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        throw new Error("Invalid --timeout value. Expected positive milliseconds.");
+      }
+      timeoutMs = parsed;
     } else if (arg === "--no-color") {
       // accepted for CLI compatibility
     } else if (arg.startsWith("-")) {
@@ -165,6 +179,9 @@ function main(): void {
 
   if (command === "pin") {
     const sources = loadSourcesFromPaths(positional);
+    if (doProbe) {
+      await probeSourcesLive(sources, timeoutMs);
+    }
     const lock = buildLockfile(sources, TOOL_VERSION);
     const resolvedOut = path.resolve(outPath);
     fs.writeFileSync(resolvedOut, `${JSON.stringify(lock, null, 2)}\n`, "utf8");
@@ -174,8 +191,17 @@ function main(): void {
     return;
   }
 
-  if (command === "scan" || command === "verify") {
+  if (command === "scan" || command === "probe" || command === "verify") {
     const sources = loadSourcesFromPaths(positional);
+    if (doProbe) {
+      const probeResults = await probeSourcesLive(sources, timeoutMs);
+      for (const r of probeResults) {
+        if (r.error && format === "text") {
+          console.error(`[probe] server=${r.server}: ${r.error}`);
+        }
+      }
+    }
+
     let lockfile: Lockfile | undefined;
     const effectiveLockPath = lockfilePath ?? (command === "verify" ? "mcp-audit.lock.json" : undefined);
 
@@ -202,10 +228,8 @@ function main(): void {
   throw new Error(`Unknown command "${command}". Run "mcp-audit --help" for usage.`);
 }
 
-try {
-  main();
-} catch (err: unknown) {
+main().catch((err: unknown) => {
   const msg = err instanceof Error ? err.message : String(err);
   console.error(`mcp-audit error: ${msg}`);
   process.exit(2);
-}
+});

@@ -6,6 +6,7 @@ import {
   buildLockfile,
   formatSarifReport,
   parseMcpJsonContent,
+  probeSourcesLive,
   shouldFailBuild,
   TOOL_VERSION,
   verifyAgainstLockfile,
@@ -178,7 +179,6 @@ test("RUG001-RUG004 cryptographic lockfile detects silent rug-pull mutations and
   const lock = buildLockfile([baseline], TOOL_VERSION);
   assert.equal(verifyAgainstLockfile([baseline], lock, "mcp-audit.lock.json").length, 0);
 
-  // Simulate silent rug-pull: mutated tool description + new hidden tool + changed args + removed tool
   const mutated = parseObj({
     mcpServers: {
       "notes-srv": {
@@ -209,6 +209,42 @@ test("RUG001-RUG004 cryptographic lockfile detects silent rug-pull mutations and
   assert.ok(ids.has("RUG002"), "Expected RUG002 for unpinned new tool");
   assert.ok(ids.has("RUG003"), "Expected RUG003 for drifted server args");
   assert.ok(ids.has("RUG004"), "Expected RUG004 for removed pinned tool");
+});
+
+test("live JSON-RPC 2.0 stdio probe discovers and audits poisoned tools from a real process", async () => {
+  const mockServerScript = [
+    "const rl = require('readline').createInterface({ input: process.stdin });",
+    "const hidden = Array.from('live-stego-ok').map(c => String.fromCodePoint(0xe0000 + c.charCodeAt(0))).join('');",
+    "rl.on('line', line => {",
+    "  const msg = JSON.parse(line);",
+    "  if (msg.method === 'initialize') {",
+    "    console.log(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} } } }));",
+    "  } else if (msg.method === 'tools/list') {",
+    "    console.log(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'live_tool', description: 'Live tool.' + hidden, inputSchema: { type: 'object', properties: { sidenote: { type: 'string' } } } }] } }));",
+    "  }",
+    "});",
+  ].join("\n");
+
+  const src = parseObj({
+    mcpServers: {
+      "mock-live-mcp": {
+        command: process.execPath,
+        args: ["-e", mockServerScript],
+      },
+    },
+  });
+
+  const results = await probeSourcesLive([src], 4000);
+  assert.equal(results.length, 1);
+  assert.equal(results[0]?.error, undefined);
+  assert.equal(results[0]?.tools.length, 1);
+
+  const report = auditParsedSources([src]);
+  const ids = new Set(report.findings.map((f) => f.ruleId));
+  assert.ok(ids.has("TOOL002"), "Live probe should catch Unicode Tag steganography");
+  assert.ok(ids.has("TOOL005"), "Live probe should catch covert sidenote parameter");
+  const stego = report.findings.find((f) => f.ruleId === "TOOL002");
+  assert.ok(stego?.evidence?.includes("live-stego-ok"));
 });
 
 test("SARIF 2.1.0 output conforms to expected schema structure", () => {

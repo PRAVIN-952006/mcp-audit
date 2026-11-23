@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getDefaultDiscoveryCandidates, loadMcpFile, parseMcpJsonContent } from "./discover.ts";
 import { buildLockfile, RUGPULL_RULES, verifyAgainstLockfile } from "./lockfile.ts";
+import { probeStdioServer, type ProbeResult } from "./probe.ts";
 import { formatJsonReport, formatSarifReport, formatTextReport } from "./reporters.ts";
 import { auditServerConfig, CONFIG_RULES } from "./rules/config-rules.ts";
 import { auditToolsAcrossServers, TOOL_RULES, type ToolAuditInput } from "./rules/tool-rules.ts";
@@ -17,7 +18,7 @@ import {
   type Severity,
 } from "./types.ts";
 
-export const TOOL_VERSION = "0.1.0";
+export const TOOL_VERSION = "0.2.0";
 
 export const ALL_RULES: RuleMetadata[] = [...CONFIG_RULES, ...TOOL_RULES, ...RUGPULL_RULES];
 
@@ -29,8 +30,10 @@ export {
   getDefaultDiscoveryCandidates,
   loadMcpFile,
   parseMcpJsonContent,
+  probeStdioServer,
   verifyAgainstLockfile,
 };
+export type { ProbeResult };
 export type * from "./types.ts";
 
 function computeGrade(score: number): AuditSummary["grade"] {
@@ -39,6 +42,24 @@ function computeGrade(score: number): AuditSummary["grade"] {
   if (score <= 35) return "C";
   if (score <= 65) return "D";
   return "F";
+}
+
+export async function probeSourcesLive(
+  sources: ParsedMcpSource[],
+  timeoutMs = 5000
+): Promise<ProbeResult[]> {
+  const results: ProbeResult[] = [];
+  for (const src of sources) {
+    for (const [serverName, cfg] of Object.entries(src.servers)) {
+      if (cfg.disabled || !cfg.command) continue;
+      const res = await probeStdioServer(serverName, cfg, timeoutMs);
+      results.push(res);
+      if (res.tools.length > 0) {
+        cfg.tools = res.tools;
+      }
+    }
+  }
+  return results;
 }
 
 export function auditParsedSources(
