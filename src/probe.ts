@@ -9,6 +9,28 @@ export interface ProbeResult {
   error?: string;
 }
 
+export interface ProbeSecurityOptions {
+  /** Allow probing RFC1918/private/metadata network endpoints over HTTP (default: false). */
+  allowPrivateNetwork?: boolean;
+  /** Maximum response/stdout bytes buffered before aborting (default: 4 MiB). */
+  maxBytes?: number;
+}
+
+const DEFAULT_MAX_PROBE_BYTES = 4 * 1024 * 1024;
+const PROBE_CLIENT_VERSION = "0.5.0";
+const SAFE_ENV_ALLOWLIST = [
+  "PATH",
+  "HOME",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "LANG",
+  "LC_ALL",
+  "TERM",
+  "SYSTEMROOT",
+  "COMSPEC",
+] as const;
+
 interface JsonRpcResponse {
   jsonrpc?: string;
   id?: number | string;
@@ -18,6 +40,81 @@ interface JsonRpcResponse {
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function buildSanitizedEnv(overrides?: Record<string, string>): Record<string, string> {
+  const safe: Record<string, string> = {};
+  for (const key of SAFE_ENV_ALLOWLIST) {
+    const val = process.env[key];
+    if (typeof val === "string") safe[key] = val;
+  }
+  if (overrides) {
+    for (const [k, v] of Object.entries(overrides)) {
+      safe[k] = v;
+    }
+  }
+  return safe;
+}
+
+function validateProbeUrl(rawUrl: string, allowPrivateNetwork: boolean): string | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return "Invalid probe URL";
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return `Unsupported probe URL protocol: ${parsed.protocol}`;
+  }
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "metadata.google.internal" || host === "169.254.169.254") {
+    return `Blocked cloud metadata endpoint: ${host}`;
+  }
+  if (!allowPrivateNetwork) {
+    if (
+      host === "0.0.0.0" ||
+      host.startsWith("169.254.") ||
+      host.startsWith("10.") ||
+      host.startsWith("192.168.") ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
+      host.startsWith("fe80:") ||
+      host.startsWith("fc") ||
+      host.startsWith("fd")
+    ) {
+      return `Blocked private/link-local probe target: ${host}`;
+    }
+  }
+  return undefined;
+}
+
+async function readResponseTextBounded(res: Response, maxBytes: number): Promise<string> {
+  const contentLength = res.headers.get("content-length");
+  if (contentLength && Number(contentLength) > maxBytes) {
+    throw new Error(`HTTP response exceeds max size limit (${maxBytes} bytes)`);
+  }
+  if (!res.body) {
+    const text = await res.text();
+    if (Buffer.byteLength(text, "utf8") > maxBytes) {
+      throw new Error(`HTTP response exceeds max size limit (${maxBytes} bytes)`);
+    }
+    return text;
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new Error(`HTTP response exceeds max size limit (${maxBytes} bytes)`);
+      }
+      chunks.push(value);
+    }
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 function extractToolsFromResult(result: Record<string, unknown>): McpToolDefinition[] {
@@ -67,10 +164,17 @@ export async function probeHttpServer(
   serverName: string,
   config: McpServerConfig,
   timeoutMs = 5000,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  securityOptions?: ProbeSecurityOptions
 ): Promise<ProbeResult> {
   if (!config.url) {
     return { server: serverName, transport: "http", tools: [], error: "No remote URL configured" };
+  }
+
+  const maxBytes = securityOptions?.maxBytes ?? DEFAULT_MAX_PROBE_BYTES;
+  const urlError = validateProbeUrl(config.url, securityOptions?.allowPrivateNetwork ?? false);
+  if (urlError) {
+    return { server: serverName, transport: "http", tools: [], error: urlError };
   }
 
   const controller = new AbortController();
@@ -94,7 +198,7 @@ export async function probeHttpServer(
         params: {
           protocolVersion: "2024-11-05",
           capabilities: {},
-          clientInfo: { name: "mcp-audit", version: "0.3.0" },
+          clientInfo: { name: "mcp-audit", version: PROBE_CLIENT_VERSION },
         },
       }),
     });
@@ -109,7 +213,8 @@ export async function probeHttpServer(
     }
 
     const sessionId = initRes.headers.get("mcp-session-id");
-    const initPayload = parseRpcPayload(await initRes.text(), initRes.headers.get("content-type") ?? "");
+    const initText = await readResponseTextBounded(initRes, maxBytes);
+    const initPayload = parseRpcPayload(initText, initRes.headers.get("content-type") ?? "");
     if (initPayload?.error) {
       return {
         server: serverName,
@@ -149,7 +254,8 @@ export async function probeHttpServer(
       };
     }
 
-    const listPayload = parseRpcPayload(await listRes.text(), listRes.headers.get("content-type") ?? "");
+    const listText = await readResponseTextBounded(listRes, maxBytes);
+    const listPayload = parseRpcPayload(listText, listRes.headers.get("content-type") ?? "");
     if (listPayload?.error) {
       return {
         server: serverName,
@@ -171,12 +277,13 @@ export async function probeHttpServer(
 
 /**
  * Probes a local stdio MCP server via standard JSON-RPC 2.0 (`initialize` -> `tools/list`)
- * using newline-delimited JSON framing with a strict timeout.
+ * using newline-delimited JSON framing with a strict timeout, sanitized environment, and byte cap.
  */
 export function probeStdioServer(
   serverName: string,
   config: McpServerConfig,
-  timeoutMs = 5000
+  timeoutMs = 5000,
+  securityOptions?: ProbeSecurityOptions
 ): Promise<ProbeResult> {
   return new Promise((resolve) => {
     if (!config.command) {
@@ -184,6 +291,7 @@ export function probeStdioServer(
       return;
     }
 
+    const maxBytes = securityOptions?.maxBytes ?? DEFAULT_MAX_PROBE_BYTES;
     let settled = false;
     const finish = (res: ProbeResult): void => {
       if (settled) return;
@@ -199,7 +307,7 @@ export function probeStdioServer(
 
     const child = spawn(config.command, config.args ?? [], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, ...(config.env ?? {}) },
+      env: buildSanitizedEnv(config.env),
     });
 
     const timer = setTimeout(() => {
@@ -207,6 +315,7 @@ export function probeStdioServer(
     }, timeoutMs);
 
     let buffer = "";
+    let totalBytes = 0;
     let protocolVersion: string | undefined;
 
     const sendRpc = (msg: Record<string, unknown>): void => {
@@ -248,6 +357,16 @@ export function probeStdioServer(
 
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
+      totalBytes += Buffer.byteLength(chunk, "utf8");
+      if (totalBytes > maxBytes) {
+        finish({
+          server: serverName,
+          transport: "stdio",
+          tools: [],
+          error: `Stdio response exceeded max size limit (${maxBytes} bytes)`,
+        });
+        return;
+      }
       buffer += chunk;
       let nlIdx = buffer.indexOf("\n");
       while (nlIdx !== -1) {
@@ -286,7 +405,7 @@ export function probeStdioServer(
       params: {
         protocolVersion: "2024-11-05",
         capabilities: {},
-        clientInfo: { name: "mcp-audit", version: "0.3.0" },
+        clientInfo: { name: "mcp-audit", version: PROBE_CLIENT_VERSION },
       },
     });
   });
