@@ -92,32 +92,56 @@ function buildSanitizedEnv(overrides?: Record<string, string>): Record<string, s
   return safe;
 }
 
-function extractMappedIpv4(ipv6Host: string): string | undefined {
-  const sixToFour = /^2002:([0-9a-f]{1,4}):([0-9a-f]{1,4})(?::|$)/.exec(ipv6Host);
-  if (sixToFour) {
-    const hi = Number.parseInt(sixToFour[1]!, 16);
-    const lo = Number.parseInt(sixToFour[2]!, 16);
-    return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+function parseIpv6Hextets(ipv6Host: string): number[] | undefined {
+  if (isIP(ipv6Host) !== 6) return undefined;
+  let addr = ipv6Host;
+  const lastColon = addr.lastIndexOf(":");
+  if (lastColon !== -1 && addr.slice(lastColon + 1).includes(".")) {
+    const v4Parts = addr.slice(lastColon + 1).split(".").map((p) => Number.parseInt(p, 10));
+    if (v4Parts.length !== 4 || v4Parts.some((n) => Number.isNaN(n) || n < 0 || n > 255)) {
+      return undefined;
+    }
+    const hi = ((v4Parts[0]! << 8) | v4Parts[1]!).toString(16);
+    const lo = ((v4Parts[2]! << 8) | v4Parts[3]!).toString(16);
+    addr = `${addr.slice(0, lastColon + 1)}${hi}:${lo}`;
   }
-  let tail: string | undefined;
-  if (ipv6Host.startsWith("::ffff:0:")) {
-    tail = ipv6Host.slice(9);
-  } else if (ipv6Host.startsWith("::ffff:")) {
-    tail = ipv6Host.slice(7);
-  } else if (ipv6Host.startsWith("64:ff9b::")) {
-    tail = ipv6Host.slice(9);
-  } else if (ipv6Host.startsWith("64:ff9b:1::")) {
-    tail = ipv6Host.slice(11);
-  } else if (ipv6Host.startsWith("::") && ipv6Host.length > 2) {
-    tail = ipv6Host.slice(2);
-  }
-  if (!tail) return undefined;
-  if (isIP(tail) === 4) return tail;
-  const hexMatch = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(tail);
-  if (!hexMatch) return undefined;
-  const hi = Number.parseInt(hexMatch[1]!, 16);
-  const lo = Number.parseInt(hexMatch[2]!, 16);
+  const halves = addr.split("::");
+  if (halves.length > 2) return undefined;
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const missing = 8 - (left.length + right.length);
+  if (halves.length === 1 && missing !== 0) return undefined;
+  if (halves.length === 2 && missing < 0) return undefined;
+  const groups = [...left, ...Array<string>(missing).fill("0"), ...right];
+  if (groups.length !== 8) return undefined;
+  const hextets = groups.map((g) => Number.parseInt(g, 16));
+  if (hextets.some((n) => Number.isNaN(n) || n < 0 || n > 0xffff)) return undefined;
+  return hextets;
+}
+
+function hextetsToIpv4(hi: number, lo: number): string {
   return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+}
+
+function extractMappedIpv4FromHextets(h: number[]): string | undefined {
+  const [h0, h1, h2, h3, h4, h5, h6, h7] = h as [number, number, number, number, number, number, number, number];
+  if (h0 === 0x2002) return hextetsToIpv4(h1, h2);
+  if (h0 === 0 && h1 === 0 && h2 === 0 && h3 === 0 && h4 === 0 && h5 === 0xffff) {
+    return hextetsToIpv4(h6, h7);
+  }
+  if (h0 === 0 && h1 === 0 && h2 === 0 && h3 === 0 && h4 === 0xffff && h5 === 0) {
+    return hextetsToIpv4(h6, h7);
+  }
+  if (h0 === 0x0064 && h1 === 0xff9b && ((h2 === 0 && h3 === 0 && h4 === 0 && h5 === 0) || h2 === 0x0001)) {
+    return hextetsToIpv4(h6, h7);
+  }
+  if (h0 === 0x2001 && h1 === 0x0000) {
+    return hextetsToIpv4(h6 ^ 0xffff, h7 ^ 0xffff);
+  }
+  if (h0 === 0 && h1 === 0 && h2 === 0 && h3 === 0 && h4 === 0 && h5 === 0 && (h6 !== 0 || h7 > 1)) {
+    return hextetsToIpv4(h6, h7);
+  }
+  return undefined;
 }
 
 function isPrivateIpv4(ipv4: string): boolean {
@@ -143,7 +167,8 @@ function checkIpAddress(ip: string, allowPrivateNetwork: boolean, requireValidIp
   if (requireValidIp && ipVersion === 0) {
     return `Blocked unparseable resolved IP address: ${noBrackets}`;
   }
-  const mappedIpv4 = ipVersion === 6 ? extractMappedIpv4(normalized) : undefined;
+  const hextets = ipVersion === 6 ? parseIpv6Hextets(normalized) : undefined;
+  const mappedIpv4 = hextets ? extractMappedIpv4FromHextets(hextets) : undefined;
   if (normalized === "169.254.169.254" || mappedIpv4 === "169.254.169.254") {
     return `Blocked cloud metadata endpoint: ${normalized}`;
   }
@@ -152,16 +177,19 @@ function checkIpAddress(ip: string, allowPrivateNetwork: boolean, requireValidIp
       return `Blocked private/link-local/loopback probe target: ${normalized}`;
     }
     if (ipVersion === 6) {
+      if (!hextets) {
+        return `Blocked unparseable IPv6 probe target: ${normalized}`;
+      }
       if (mappedIpv4 && isPrivateIpv4(mappedIpv4)) {
         return `Blocked private/link-local/loopback probe target: ${normalized}`;
       }
-      if (
-        normalized === "::" ||
-        normalized === "::1" ||
-        normalized.startsWith("fe80:") ||
-        /^fe[89ab][0-9a-f]:/.test(normalized) ||
-        /^f[cd][0-9a-f]{2}:/.test(normalized)
-      ) {
+      const [h0, h1, h2, h3, h4, h5, h6, h7] = hextets as [number, number, number, number, number, number, number, number];
+      const isUnspecified = h0 === 0 && h1 === 0 && h2 === 0 && h3 === 0 && h4 === 0 && h5 === 0 && h6 === 0 && h7 === 0;
+      const isLoopback = h0 === 0 && h1 === 0 && h2 === 0 && h3 === 0 && h4 === 0 && h5 === 0 && h6 === 0 && h7 === 1;
+      const isLinkLocal = (h0 & 0xffc0) === 0xfe80;
+      const isUniqueLocal = (h0 & 0xfe00) === 0xfc00;
+      const isMulticast = (h0 & 0xff00) === 0xff00;
+      if (isUnspecified || isLoopback || isLinkLocal || isUniqueLocal || isMulticast) {
         return `Blocked private/link-local/loopback probe target: ${normalized}`;
       }
     }
@@ -231,16 +259,22 @@ function pinnedHttpPost(
   return new Promise((resolve, reject) => {
     const parsed = new URL(rawUrl);
     const isHttps = parsed.protocol === "https:";
+    const bareHost = parsed.hostname.replace(/^\[|\]$/g, "");
+    const cleanHeaders: Record<string, string> = {};
+    for (const [k, v] of Object.entries(headers)) {
+      if (k.toLowerCase() !== "host") cleanHeaders[k] = v;
+    }
+    cleanHeaders["host"] = parsed.host;
     const transport = isHttps ? https : http;
     const req = transport.request(
       {
-        hostname: parsed.hostname,
+        hostname: bareHost,
         port: parsed.port ? Number(parsed.port) : isHttps ? 443 : 80,
         path: `${parsed.pathname}${parsed.search}`,
         method: "POST",
-        headers: { ...headers, host: parsed.host },
+        headers: cleanHeaders,
         signal,
-        ...(isHttps ? { servername: parsed.hostname } : {}),
+        ...(isHttps && isIP(bareHost) === 0 ? { servername: bareHost } : {}),
         lookup: (_hostname, _opts, cb) => {
           cb(null, resolvedAddress, family);
         },

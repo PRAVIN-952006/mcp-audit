@@ -437,6 +437,8 @@ test("validateProbeUrl blocks IPv6 zone IDs, RFC 8215 NAT64, IPv4-translated, 6t
   assert.ok(validateProbeUrl(["http", "://[64:ff9b:1::a9fe:a9fe]/mcp"].join(""), false));
   assert.ok(validateProbeUrl(["http", "://[::ffff:0:127.0.0.1]/mcp"].join(""), false));
   assert.ok(validateProbeUrl(["http", "://[2002:7f00:0001::1]/mcp"].join(""), false));
+  assert.ok(validateProbeUrl(["http", "://[0:0:0:0:0:ffff:a9fe:a9fe]/mcp"].join(""), false));
+  assert.ok(validateProbeUrl(["http", "://[0064:ff9b:0:0:0:0:a9fe:a9fe]/mcp"].join(""), false));
   assert.ok(validateProbeUrl(["http", "://metadata", ".google.internal../mcp"].join(""), false));
 
   const hardened = hardenMcpJsonContent(
