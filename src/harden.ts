@@ -1,3 +1,4 @@
+import { BLOCKED_OVERRIDE_ENV_KEYS } from "./probe.ts";
 import type { McpServerConfig, McpToolDefinition } from "./types.ts";
 
 export interface HardenChange {
@@ -16,13 +17,9 @@ const SECRET_VALUE_REGEX =
 
 const SENSITIVE_KEY_REGEX = /(?:SECRET|TOKEN|API[_-]?KEY|PASSWORD|PASSWD|PRIVATE[_-]?KEY|AUTH|CREDENTIAL)/i;
 const PLACEHOLDER_REGEX = /^(?:\$\{[^}]+\}|\$[A-Z_][A-Z0-9_]*|<[^>]+>|YOUR[_-]?.*|REPLACE[_-]?.*)$/i;
-const DANGEROUS_ENV_KEYS = new Set([
-  "LD_PRELOAD",
-  "LD_LIBRARY_PATH",
-  "DYLD_INSERT_LIBRARIES",
-  "DYLD_LIBRARY_PATH",
-  "NODE_OPTIONS",
-]);
+const DANGEROUS_ENV_KEYS = new Set(
+  [...BLOCKED_OVERRIDE_ENV_KEYS].filter((k) => k !== "PATH" && k !== "NODE_TLS_REJECT_UNAUTHORIZED")
+);
 
 function stripInvisibleUnicode(text: string): { cleaned: string; removed: number } {
   let removed = 0;
@@ -57,12 +54,12 @@ function hardenServerMap(servers: Record<string, unknown>, changes: HardenChange
       for (const [k, v] of Object.entries(env)) {
         if (typeof v !== "string") continue;
         const trimmed = v.trim();
-        if (DANGEROUS_ENV_KEYS.has(k)) {
+        if (DANGEROUS_ENV_KEYS.has(k.toUpperCase())) {
           delete env[k];
           changes.push({ server: serverName, field: `env.${k}`, action: `Removed dangerous loader override ${k}` });
           continue;
         }
-        if (k === "NODE_TLS_REJECT_UNAUTHORIZED" && trimmed === "0") {
+        if (k.toUpperCase() === "NODE_TLS_REJECT_UNAUTHORIZED" && trimmed === "0") {
           delete env[k];
           changes.push({
             server: serverName,
@@ -138,6 +135,17 @@ function hardenServerMap(servers: Record<string, unknown>, changes: HardenChange
     // 5. Strip invisible Unicode Tag / bidi / zero-width steganography from inline tool schemas
     if (Array.isArray(cfg.tools)) {
       for (const tool of cfg.tools as McpToolDefinition[]) {
+        if (typeof tool.name === "string") {
+          const { cleaned, removed } = stripInvisibleUnicode(tool.name);
+          if (removed > 0) {
+            tool.name = cleaned;
+            changes.push({
+              server: serverName,
+              field: `tools.${tool.name}.name`,
+              action: `Stripped ${removed} invisible Unicode steganography character(s)`,
+            });
+          }
+        }
         if (typeof tool.description === "string") {
           const { cleaned, removed } = stripInvisibleUnicode(tool.description);
           if (removed > 0) {
@@ -147,6 +155,21 @@ function hardenServerMap(servers: Record<string, unknown>, changes: HardenChange
               field: `tools.${tool.name}.description`,
               action: `Stripped ${removed} invisible Unicode steganography character(s)`,
             });
+          }
+        }
+        if (isRecord(tool.inputSchema) && isRecord(tool.inputSchema["properties"])) {
+          for (const [propName, propVal] of Object.entries(tool.inputSchema["properties"])) {
+            if (isRecord(propVal) && typeof propVal["description"] === "string") {
+              const { cleaned, removed } = stripInvisibleUnicode(propVal["description"]);
+              if (removed > 0) {
+                propVal["description"] = cleaned;
+                changes.push({
+                  server: serverName,
+                  field: `tools.${tool.name}.inputSchema.properties.${propName}.description`,
+                  action: `Stripped ${removed} invisible Unicode steganography character(s)`,
+                });
+              }
+            }
           }
         }
       }

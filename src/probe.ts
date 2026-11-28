@@ -44,20 +44,34 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-const BLOCKED_OVERRIDE_ENV_KEYS = new Set([
+export const BLOCKED_OVERRIDE_ENV_KEYS = new Set([
   "PATH",
   "LD_PRELOAD",
   "LD_LIBRARY_PATH",
+  "LD_AUDIT",
   "DYLD_INSERT_LIBRARIES",
   "DYLD_LIBRARY_PATH",
+  "DYLD_FRAMEWORK_PATH",
+  "DYLD_FALLBACK_LIBRARY_PATH",
   "NODE_OPTIONS",
   "NODE_TLS_REJECT_UNAUTHORIZED",
   "PYTHONPATH",
   "PYTHONSTARTUP",
+  "PYTHONHOME",
+  "PYTHONINSPECT",
   "BASH_ENV",
   "ENV",
   "RUBYOPT",
+  "RUBYLIB",
   "PERL5OPT",
+  "PERL5LIB",
+  "JAVA_TOOL_OPTIONS",
+  "_JAVA_OPTIONS",
+  "NPM_CONFIG_USERCONFIG",
+  "GIT_SSH_COMMAND",
+  "SSL_CERT_FILE",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
   "IFS",
 ]);
 
@@ -77,8 +91,15 @@ function buildSanitizedEnv(overrides?: Record<string, string>): Record<string, s
 }
 
 function extractMappedIpv4(ipv6Host: string): string | undefined {
-  if (!ipv6Host.startsWith("::ffff:")) return undefined;
-  const tail = ipv6Host.slice(7);
+  let tail: string | undefined;
+  if (ipv6Host.startsWith("::ffff:")) {
+    tail = ipv6Host.slice(7);
+  } else if (ipv6Host.startsWith("64:ff9b::")) {
+    tail = ipv6Host.slice(9);
+  } else if (ipv6Host.startsWith("::") && ipv6Host.length > 2) {
+    tail = ipv6Host.slice(2);
+  }
+  if (!tail) return undefined;
   if (isIP(tail) === 4) return tail;
   const hexMatch = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(tail);
   if (!hexMatch) return undefined;
@@ -90,6 +111,7 @@ function extractMappedIpv4(ipv6Host: string): string | undefined {
 function isPrivateIpv4(ipv4: string): boolean {
   return (
     ipv4.startsWith("0.") ||
+    ipv4.startsWith("127.") ||
     ipv4.startsWith("169.254.") ||
     ipv4.startsWith("10.") ||
     ipv4.startsWith("192.168.") ||
@@ -107,19 +129,20 @@ function checkIpAddress(ip: string, allowPrivateNetwork: boolean): string | unde
   }
   if (!allowPrivateNetwork) {
     if (ipVersion === 4 && isPrivateIpv4(normalized)) {
-      return `Blocked private/link-local probe target: ${normalized}`;
+      return `Blocked private/link-local/loopback probe target: ${normalized}`;
     }
     if (ipVersion === 6) {
       if (mappedIpv4 && isPrivateIpv4(mappedIpv4)) {
-        return `Blocked private/link-local probe target: ${normalized}`;
+        return `Blocked private/link-local/loopback probe target: ${normalized}`;
       }
       if (
         normalized === "::" ||
+        normalized === "::1" ||
         normalized.startsWith("fe80:") ||
         /^fe[89ab][0-9a-f]:/.test(normalized) ||
         /^f[cd][0-9a-f]{2}:/.test(normalized)
       ) {
-        return `Blocked private/link-local probe target: ${normalized}`;
+        return `Blocked private/link-local/loopback probe target: ${normalized}`;
       }
     }
   }
@@ -136,25 +159,32 @@ export function validateProbeUrl(rawUrl: string, allowPrivateNetwork: boolean): 
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     return `Unsupported probe URL protocol: ${parsed.protocol}`;
   }
-  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
   if (host === "metadata.google.internal") {
     return `Blocked cloud metadata endpoint: ${host}`;
+  }
+  if (!allowPrivateNetwork && (host === "localhost" || host.endsWith(".localhost"))) {
+    return `Blocked private/link-local/loopback probe target: ${host}`;
   }
   return checkIpAddress(host, allowPrivateNetwork);
 }
 
 async function validateResolvedHost(rawUrl: string, allowPrivateNetwork: boolean): Promise<string | undefined> {
   const parsed = new URL(rawUrl);
-  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (isIP(host) !== 0 || host === "localhost") return undefined;
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (isIP(host) !== 0) return undefined;
   try {
     const records = await dnsLookup(host, { all: true, verbatim: true });
+    if (records.length === 0) {
+      return `DNS resolution returned no addresses for ${host}`;
+    }
     for (const rec of records) {
       const ipErr = checkIpAddress(rec.address, allowPrivateNetwork);
       if (ipErr) return `${ipErr} (resolved from ${host})`;
     }
-  } catch {
-    // Let fetch report DNS failure normally
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `DNS resolution failed for ${host}: ${msg}`;
   }
   return undefined;
 }
