@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { McpServerConfig, McpToolDefinition } from "./types.ts";
 
@@ -44,11 +45,20 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 }
 
 const BLOCKED_OVERRIDE_ENV_KEYS = new Set([
+  "PATH",
   "LD_PRELOAD",
   "LD_LIBRARY_PATH",
   "DYLD_INSERT_LIBRARIES",
   "DYLD_LIBRARY_PATH",
   "NODE_OPTIONS",
+  "NODE_TLS_REJECT_UNAUTHORIZED",
+  "PYTHONPATH",
+  "PYTHONSTARTUP",
+  "BASH_ENV",
+  "ENV",
+  "RUBYOPT",
+  "PERL5OPT",
+  "IFS",
 ]);
 
 function buildSanitizedEnv(overrides?: Record<string, string>): Record<string, string> {
@@ -79,12 +89,41 @@ function extractMappedIpv4(ipv6Host: string): string | undefined {
 
 function isPrivateIpv4(ipv4: string): boolean {
   return (
-    ipv4 === "0.0.0.0" ||
+    ipv4.startsWith("0.") ||
     ipv4.startsWith("169.254.") ||
     ipv4.startsWith("10.") ||
     ipv4.startsWith("192.168.") ||
-    /^172\.(1[6-9]|2\d|3[0-1])\./.test(ipv4)
+    /^172\.(1[6-9]|2\d|3[0-1])\./.test(ipv4) ||
+    /^100\.(6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\./.test(ipv4)
   );
+}
+
+function checkIpAddress(ip: string, allowPrivateNetwork: boolean): string | undefined {
+  const normalized = ip.toLowerCase().replace(/^\[|\]$/g, "");
+  const ipVersion = isIP(normalized);
+  const mappedIpv4 = ipVersion === 6 ? extractMappedIpv4(normalized) : undefined;
+  if (normalized === "169.254.169.254" || mappedIpv4 === "169.254.169.254") {
+    return `Blocked cloud metadata endpoint: ${normalized}`;
+  }
+  if (!allowPrivateNetwork) {
+    if (ipVersion === 4 && isPrivateIpv4(normalized)) {
+      return `Blocked private/link-local probe target: ${normalized}`;
+    }
+    if (ipVersion === 6) {
+      if (mappedIpv4 && isPrivateIpv4(mappedIpv4)) {
+        return `Blocked private/link-local probe target: ${normalized}`;
+      }
+      if (
+        normalized === "::" ||
+        normalized.startsWith("fe80:") ||
+        /^fe[89ab][0-9a-f]:/.test(normalized) ||
+        /^f[cd][0-9a-f]{2}:/.test(normalized)
+      ) {
+        return `Blocked private/link-local probe target: ${normalized}`;
+      }
+    }
+  }
+  return undefined;
 }
 
 export function validateProbeUrl(rawUrl: string, allowPrivateNetwork: boolean): string | undefined {
@@ -98,33 +137,24 @@ export function validateProbeUrl(rawUrl: string, allowPrivateNetwork: boolean): 
     return `Unsupported probe URL protocol: ${parsed.protocol}`;
   }
   const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  const ipVersion = isIP(host);
-  const mappedIpv4 = ipVersion === 6 ? extractMappedIpv4(host) : undefined;
-
-  if (
-    host === "metadata.google.internal" ||
-    host === "169.254.169.254" ||
-    mappedIpv4 === "169.254.169.254"
-  ) {
+  if (host === "metadata.google.internal") {
     return `Blocked cloud metadata endpoint: ${host}`;
   }
-  if (!allowPrivateNetwork) {
-    if (ipVersion === 4 && isPrivateIpv4(host)) {
-      return `Blocked private/link-local probe target: ${host}`;
+  return checkIpAddress(host, allowPrivateNetwork);
+}
+
+async function validateResolvedHost(rawUrl: string, allowPrivateNetwork: boolean): Promise<string | undefined> {
+  const parsed = new URL(rawUrl);
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (isIP(host) !== 0 || host === "localhost") return undefined;
+  try {
+    const records = await dnsLookup(host, { all: true, verbatim: true });
+    for (const rec of records) {
+      const ipErr = checkIpAddress(rec.address, allowPrivateNetwork);
+      if (ipErr) return `${ipErr} (resolved from ${host})`;
     }
-    if (ipVersion === 6) {
-      if (mappedIpv4 && isPrivateIpv4(mappedIpv4)) {
-        return `Blocked private/link-local probe target: ${host}`;
-      }
-      if (
-        host === "::" ||
-        host.startsWith("fe80:") ||
-        /^fe[89ab][0-9a-f]:/.test(host) ||
-        /^f[cd][0-9a-f]{2}:/.test(host)
-      ) {
-        return `Blocked private/link-local probe target: ${host}`;
-      }
-    }
+  } catch {
+    // Let fetch report DNS failure normally
   }
   return undefined;
 }
@@ -214,9 +244,16 @@ export async function probeHttpServer(
   }
 
   const maxBytes = securityOptions?.maxBytes ?? DEFAULT_MAX_PROBE_BYTES;
-  const urlError = validateProbeUrl(config.url, securityOptions?.allowPrivateNetwork ?? false);
+  const allowPrivate = securityOptions?.allowPrivateNetwork ?? false;
+  const urlError = validateProbeUrl(config.url, allowPrivate);
   if (urlError) {
     return { server: serverName, transport: "http", tools: [], error: urlError };
+  }
+  if (fetchImpl === fetch) {
+    const dnsError = await validateResolvedHost(config.url, allowPrivate);
+    if (dnsError) {
+      return { server: serverName, transport: "http", tools: [], error: dnsError };
+    }
   }
 
   const controller = new AbortController();
