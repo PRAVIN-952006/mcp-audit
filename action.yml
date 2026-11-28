@@ -7,7 +7,7 @@ branding:
 
 inputs:
   path:
-    description: "Path(s) to MCP config JSON file(s) or directory to audit (defaults to auto-discovery)."
+    description: "Path to an MCP config JSON file or directory to audit (defaults to auto-discovery)."
     required: false
     default: ""
   probe:

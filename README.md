@@ -14,9 +14,9 @@ AI coding agents and desktop assistants (Claude Desktop, Cursor, VS Code, Claude
 - **Zero runtime dependencies** (`"dependencies": {}`): pure Node.js built-ins + strict TypeScript—no supply-chain bloat.
 - **Live JSON-RPC 2.0 probing (`mcp-audit probe`):** Audits both **local `stdio`** servers and **remote Streamable-HTTP / SSE** MCP endpoints (`initialize` -> `Mcp-Session-Id` -> `tools/list`) with strict timeouts.
 - **Drop-in GitHub Action (`action.yml`):** Add 4 lines to any workflow to block poisoned MCP configs on pull requests and upload **SARIF 2.1.0** alerts to GitHub Security.
-- **20 built-in security rules** across 3 engines:
+- **21 built-in security rules** across 3 engines:
   - `MCP001`–`MCP008`: Static config security (unpinned `npx -y`/`uvx`, hardcoded secrets, plaintext HTTP/0.0.0.0, shell wrappers, root/`~/.ssh` mounts, `LD_PRELOAD`/`NODE_TLS_REJECT_UNAUTHORIZED=0`, temp binaries, wildcard `autoApprove`).
-  - `TOOL001`–`TOOL008`: Tool-schema poisoning & steganography (hidden instruction override directives, Unicode Tag `U+E0000–E007F` & bidi/zero-width smuggling with automatic payload decoding, SSH/AWS/`.env` exfiltration directives, cross-server tool name collisions, covert `sidenote`/`debug_context` parameter traps, embedded webhooks, unconstrained destructive schemas, context-stuffing descriptions).
+  - `TOOL001`–`TOOL009`: Tool-schema poisoning, steganography & cross-server lethal trifecta detection (hidden instruction override directives, Unicode Tag `U+E0000–E007F` & bidi/zero-width smuggling with automatic payload decoding, SSH/AWS/`.env` exfiltration directives, cross-server tool name collisions, covert `sidenote`/`debug_context` parameter traps, embedded webhooks, unconstrained destructive schemas, context-stuffing descriptions, and cross-server untrusted-input + private-data + outbound-exfiltration toxic flows).
   - `RUG001`–`RUG004`: Cryptographic SHA-256 lockfile pinning (`mcp-audit.lock.json`) using canonical JSON hashing to catch silent tool-description or command mutations after installation—without ever writing secret values to the lockfile.
 - **CI & GitHub Security ready**: Outputs human-readable reports (`A`–`F` grade + 0–100 risk score), JSON, and **SARIF 2.1.0** for GitHub Code Scanning.
 
@@ -84,6 +84,7 @@ node src/cli.ts scan .cursor/mcp.json --format sarif > mcp-audit.sarif
 | `TOOL006` | MEDIUM | exfiltration | External webhook/tunnel or templated exfiltration URLs inside tool descriptions |
 | `TOOL007` | MEDIUM | schema | Unconstrained input schemas on destructive/exec/write tools |
 | `TOOL008` | LOW | tool-poisoning | Bloated descriptions (> 1,500 chars) risking hidden instructions below UI folds |
+| `TOOL009` | CRITICAL | toxic-flow | Cross-server lethal trifecta combining untrusted external input, local secret/file read, and outbound exfiltration sink |
 | `RUG001` | CRITICAL | rug-pull | Tool description or `inputSchema` SHA-256 hash mutated after lockfile pin |
 | `RUG002` | HIGH | rug-pull | Unpinned new server or tool added after lockfile pin |
 | `RUG003` | HIGH | rug-pull | Server `command`, `args`, `url`, or `env` keys drifted since lockfile pin |
