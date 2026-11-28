@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { isIP } from "node:net";
 import type { McpServerConfig, McpToolDefinition } from "./types.ts";
 
 export interface ProbeResult {
@@ -42,6 +43,14 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+const BLOCKED_OVERRIDE_ENV_KEYS = new Set([
+  "LD_PRELOAD",
+  "LD_LIBRARY_PATH",
+  "DYLD_INSERT_LIBRARIES",
+  "DYLD_LIBRARY_PATH",
+  "NODE_OPTIONS",
+]);
+
 function buildSanitizedEnv(overrides?: Record<string, string>): Record<string, string> {
   const safe: Record<string, string> = {};
   for (const key of SAFE_ENV_ALLOWLIST) {
@@ -50,13 +59,35 @@ function buildSanitizedEnv(overrides?: Record<string, string>): Record<string, s
   }
   if (overrides) {
     for (const [k, v] of Object.entries(overrides)) {
+      if (BLOCKED_OVERRIDE_ENV_KEYS.has(k.toUpperCase())) continue;
       safe[k] = v;
     }
   }
   return safe;
 }
 
-function validateProbeUrl(rawUrl: string, allowPrivateNetwork: boolean): string | undefined {
+function extractMappedIpv4(ipv6Host: string): string | undefined {
+  if (!ipv6Host.startsWith("::ffff:")) return undefined;
+  const tail = ipv6Host.slice(7);
+  if (isIP(tail) === 4) return tail;
+  const hexMatch = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(tail);
+  if (!hexMatch) return undefined;
+  const hi = Number.parseInt(hexMatch[1]!, 16);
+  const lo = Number.parseInt(hexMatch[2]!, 16);
+  return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+}
+
+function isPrivateIpv4(ipv4: string): boolean {
+  return (
+    ipv4 === "0.0.0.0" ||
+    ipv4.startsWith("169.254.") ||
+    ipv4.startsWith("10.") ||
+    ipv4.startsWith("192.168.") ||
+    /^172\.(1[6-9]|2\d|3[0-1])\./.test(ipv4)
+  );
+}
+
+export function validateProbeUrl(rawUrl: string, allowPrivateNetwork: boolean): string | undefined {
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
@@ -67,21 +98,32 @@ function validateProbeUrl(rawUrl: string, allowPrivateNetwork: boolean): string 
     return `Unsupported probe URL protocol: ${parsed.protocol}`;
   }
   const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (host === "metadata.google.internal" || host === "169.254.169.254") {
+  const ipVersion = isIP(host);
+  const mappedIpv4 = ipVersion === 6 ? extractMappedIpv4(host) : undefined;
+
+  if (
+    host === "metadata.google.internal" ||
+    host === "169.254.169.254" ||
+    mappedIpv4 === "169.254.169.254"
+  ) {
     return `Blocked cloud metadata endpoint: ${host}`;
   }
   if (!allowPrivateNetwork) {
-    if (
-      host === "0.0.0.0" ||
-      host.startsWith("169.254.") ||
-      host.startsWith("10.") ||
-      host.startsWith("192.168.") ||
-      /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
-      host.startsWith("fe80:") ||
-      host.startsWith("fc") ||
-      host.startsWith("fd")
-    ) {
+    if (ipVersion === 4 && isPrivateIpv4(host)) {
       return `Blocked private/link-local probe target: ${host}`;
+    }
+    if (ipVersion === 6) {
+      if (mappedIpv4 && isPrivateIpv4(mappedIpv4)) {
+        return `Blocked private/link-local probe target: ${host}`;
+      }
+      if (
+        host === "::" ||
+        host.startsWith("fe80:") ||
+        /^fe[89ab][0-9a-f]:/.test(host) ||
+        /^f[cd][0-9a-f]{2}:/.test(host)
+      ) {
+        return `Blocked private/link-local probe target: ${host}`;
+      }
     }
   }
   return undefined;
@@ -190,6 +232,7 @@ export async function probeHttpServer(
     const initRes = await fetchImpl(config.url, {
       method: "POST",
       headers: baseHeaders,
+      redirect: "error",
       signal: controller.signal,
       body: JSON.stringify({
         jsonrpc: "2.0",
@@ -236,6 +279,7 @@ export async function probeHttpServer(
     const listRes = await fetchImpl(config.url, {
       method: "POST",
       headers: sessionHeaders,
+      redirect: "error",
       signal: controller.signal,
       body: JSON.stringify({
         jsonrpc: "2.0",
@@ -309,6 +353,7 @@ export function probeStdioServer(
       stdio: ["pipe", "pipe", "pipe"],
       env: buildSanitizedEnv(config.env),
     });
+    child.stderr.resume();
 
     const timer = setTimeout(() => {
       finish({ server: serverName, transport: "stdio", tools: [], error: `Timed out after ${timeoutMs}ms` });

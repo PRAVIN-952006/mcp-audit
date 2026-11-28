@@ -32,25 +32,31 @@ runs:
   steps:
     - name: Run mcp-audit
       shell: bash
+      env:
+        MCP_AUDIT_PROBE: ${{ inputs.probe }}
+        MCP_AUDIT_PATH: ${{ inputs.path }}
+        MCP_AUDIT_LOCKFILE: ${{ inputs.lockfile }}
+        MCP_AUDIT_FAIL_ON: ${{ inputs.fail-on }}
+        MCP_AUDIT_SARIF_FILE: ${{ inputs.sarif-file }}
       run: |
         CMD="scan"
-        if [ "${{ inputs.probe }}" = "true" ]; then
+        if [ "$MCP_AUDIT_PROBE" = "true" ]; then
           CMD="probe"
         fi
 
         ARGS=()
-        if [ -n "${{ inputs.path }}" ]; then
-          ARGS+=("${{ inputs.path }}")
+        if [ -n "$MCP_AUDIT_PATH" ]; then
+          ARGS+=("$MCP_AUDIT_PATH")
         fi
-        if [ -n "${{ inputs.lockfile }}" ]; then
-          ARGS+=("--lockfile" "${{ inputs.lockfile }}")
+        if [ -n "$MCP_AUDIT_LOCKFILE" ]; then
+          ARGS+=("--lockfile" "$MCP_AUDIT_LOCKFILE")
         fi
-        if [ -n "${{ inputs.fail-on }}" ]; then
-          ARGS+=("--fail-on" "${{ inputs.fail-on }}")
+        if [ -n "$MCP_AUDIT_FAIL_ON" ]; then
+          ARGS+=("--fail-on" "$MCP_AUDIT_FAIL_ON")
         fi
 
-        if [ -n "${{ inputs.sarif-file }}" ]; then
-          node "${{ github.action_path }}/src/cli.ts" "$CMD" "${ARGS[@]}" --format sarif > "${{ inputs.sarif-file }}" || EXIT_CODE=$?
+        if [ -n "$MCP_AUDIT_SARIF_FILE" ]; then
+          node "${{ github.action_path }}/src/cli.ts" "$CMD" "${ARGS[@]}" --format sarif > "$MCP_AUDIT_SARIF_FILE" || EXIT_CODE=$?
           node "${{ github.action_path }}/src/cli.ts" "$CMD" "${ARGS[@]}" || true
           exit "${EXIT_CODE:-0}"
         else
