@@ -50,16 +50,14 @@ function hardenServerMap(servers: Record<string, unknown>, changes: HardenChange
 
     // 1. Replace hardcoded secrets in env with ${KEY} references & remove dangerous loader overrides
     if (isRecord(cfg.env)) {
-      const env = cfg.env as Record<string, string>;
+      const env = cfg.env as Record<string, unknown>;
       for (const [k, v] of Object.entries(env)) {
-        if (typeof v !== "string") continue;
-        const trimmed = v.trim();
         if (DANGEROUS_ENV_KEYS.has(k.toUpperCase())) {
           delete env[k];
           changes.push({ server: serverName, field: `env.${k}`, action: `Removed dangerous loader override ${k}` });
           continue;
         }
-        if (k.toUpperCase() === "NODE_TLS_REJECT_UNAUTHORIZED" && trimmed === "0") {
+        if (k.toUpperCase() === "NODE_TLS_REJECT_UNAUTHORIZED" && String(v).trim() === "0") {
           delete env[k];
           changes.push({
             server: serverName,
@@ -68,6 +66,8 @@ function hardenServerMap(servers: Record<string, unknown>, changes: HardenChange
           });
           continue;
         }
+        if (typeof v !== "string") continue;
+        const trimmed = v.trim();
         if (
           trimmed &&
           !PLACEHOLDER_REGEX.test(trimmed) &&

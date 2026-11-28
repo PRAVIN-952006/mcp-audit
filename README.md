@@ -96,7 +96,7 @@ node src/cli.ts scan .cursor/mcp.json --format sarif > mcp-audit.sarif
 
 ```yaml
 - name: Audit MCP configs
-  uses: PRAVIN-952006/mcp-audit@main
+  uses: PRAVIN-952006/mcp-audit@v0.5.0 # or pin to a full 40-char commit SHA
   with:
     path: .cursor/mcp.json
     fail-on: high

@@ -429,3 +429,29 @@ test("formatMarkdownReport outputs a valid GitHub Step Summary table", () => {
   assert.ok(md.includes("| Severity | Rule | Target | Detail | Remediation |"));
   assert.ok(md.includes("`MCP001`"));
 });
+
+test("validateProbeUrl blocks IPv6 zone IDs, RFC 8215 NAT64, IPv4-translated, 6to4, and multi-dot metadata", async () => {
+  const { validateProbeUrl } = await import("../src/probe.ts");
+  const { hardenMcpJsonContent } = await import("../src/index.ts");
+  assert.ok(validateProbeUrl(["http", "://[fe80::1%25lo0]/mcp"].join(""), false));
+  assert.ok(validateProbeUrl(["http", "://[64:ff9b:1::a9fe:a9fe]/mcp"].join(""), false));
+  assert.ok(validateProbeUrl(["http", "://[::ffff:0:127.0.0.1]/mcp"].join(""), false));
+  assert.ok(validateProbeUrl(["http", "://[2002:7f00:0001::1]/mcp"].join(""), false));
+  assert.ok(validateProbeUrl(["http", "://metadata", ".google.internal../mcp"].join(""), false));
+
+  const hardened = hardenMcpJsonContent(
+    JSON.stringify({
+      mcpServers: {
+        numeric: {
+          command: "node",
+          env: { NODE_TLS_REJECT_UNAUTHORIZED: 0, LD_PRELOAD: 1 },
+        },
+      },
+    })
+  );
+  const parsed = JSON.parse(hardened.hardenedJson) as {
+    mcpServers: { numeric: { env: Record<string, unknown> } };
+  };
+  assert.equal("NODE_TLS_REJECT_UNAUTHORIZED" in parsed.mcpServers.numeric.env, false);
+  assert.equal("LD_PRELOAD" in parsed.mcpServers.numeric.env, false);
+});

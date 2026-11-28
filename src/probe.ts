@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import { lookup as dnsLookup } from "node:dns/promises";
+import http from "node:http";
+import https from "node:https";
 import { isIP } from "node:net";
 import type { McpServerConfig, McpToolDefinition } from "./types.ts";
 
@@ -91,11 +93,21 @@ function buildSanitizedEnv(overrides?: Record<string, string>): Record<string, s
 }
 
 function extractMappedIpv4(ipv6Host: string): string | undefined {
+  const sixToFour = /^2002:([0-9a-f]{1,4}):([0-9a-f]{1,4})(?::|$)/.exec(ipv6Host);
+  if (sixToFour) {
+    const hi = Number.parseInt(sixToFour[1]!, 16);
+    const lo = Number.parseInt(sixToFour[2]!, 16);
+    return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+  }
   let tail: string | undefined;
-  if (ipv6Host.startsWith("::ffff:")) {
+  if (ipv6Host.startsWith("::ffff:0:")) {
+    tail = ipv6Host.slice(9);
+  } else if (ipv6Host.startsWith("::ffff:")) {
     tail = ipv6Host.slice(7);
   } else if (ipv6Host.startsWith("64:ff9b::")) {
     tail = ipv6Host.slice(9);
+  } else if (ipv6Host.startsWith("64:ff9b:1::")) {
+    tail = ipv6Host.slice(11);
   } else if (ipv6Host.startsWith("::") && ipv6Host.length > 2) {
     tail = ipv6Host.slice(2);
   }
@@ -120,9 +132,17 @@ function isPrivateIpv4(ipv4: string): boolean {
   );
 }
 
-function checkIpAddress(ip: string, allowPrivateNetwork: boolean): string | undefined {
-  const normalized = ip.toLowerCase().replace(/^\[|\]$/g, "");
+function checkIpAddress(ip: string, allowPrivateNetwork: boolean, requireValidIp = false): string | undefined {
+  const noBrackets = ip.toLowerCase().replace(/^\[|\]$/g, "");
+  const hasZone = noBrackets.includes("%");
+  const normalized = (hasZone ? noBrackets.split("%")[0] : noBrackets) ?? "";
   const ipVersion = isIP(normalized);
+  if (hasZone && ipVersion !== 6) {
+    return `Blocked invalid scoped IP target: ${noBrackets}`;
+  }
+  if (requireValidIp && ipVersion === 0) {
+    return `Blocked unparseable resolved IP address: ${noBrackets}`;
+  }
   const mappedIpv4 = ipVersion === 6 ? extractMappedIpv4(normalized) : undefined;
   if (normalized === "169.254.169.254" || mappedIpv4 === "169.254.169.254") {
     return `Blocked cloud metadata endpoint: ${normalized}`;
@@ -159,7 +179,7 @@ export function validateProbeUrl(rawUrl: string, allowPrivateNetwork: boolean): 
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     return `Unsupported probe URL protocol: ${parsed.protocol}`;
   }
-  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.+$/, "");
   if (host === "metadata.google.internal") {
     return `Blocked cloud metadata endpoint: ${host}`;
   }
@@ -169,24 +189,101 @@ export function validateProbeUrl(rawUrl: string, allowPrivateNetwork: boolean): 
   return checkIpAddress(host, allowPrivateNetwork);
 }
 
-async function validateResolvedHost(rawUrl: string, allowPrivateNetwork: boolean): Promise<string | undefined> {
+interface ResolvedHostResult {
+  error?: string;
+  address?: string;
+  family?: 4 | 6;
+}
+
+async function validateResolvedHost(rawUrl: string, allowPrivateNetwork: boolean): Promise<ResolvedHostResult> {
   const parsed = new URL(rawUrl);
-  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
-  if (isIP(host) !== 0) return undefined;
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.+$/, "");
+  const literalIp = isIP(host.split("%")[0] ?? "");
+  if (literalIp !== 0) {
+    return { address: host.split("%")[0], family: literalIp as 4 | 6 };
+  }
   try {
     const records = await dnsLookup(host, { all: true, verbatim: true });
     if (records.length === 0) {
-      return `DNS resolution returned no addresses for ${host}`;
+      return { error: `DNS resolution returned no addresses for ${host}` };
     }
     for (const rec of records) {
-      const ipErr = checkIpAddress(rec.address, allowPrivateNetwork);
-      if (ipErr) return `${ipErr} (resolved from ${host})`;
+      const ipErr = checkIpAddress(rec.address, allowPrivateNetwork, true);
+      if (ipErr) return { error: `${ipErr} (resolved from ${host})` };
     }
+    const first = records[0]!;
+    return { address: first.address, family: first.family === 6 ? 6 : 4 };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return `DNS resolution failed for ${host}: ${msg}`;
+    return { error: `DNS resolution failed for ${host}: ${msg}` };
   }
-  return undefined;
+}
+
+function pinnedHttpPost(
+  rawUrl: string,
+  headers: Record<string, string>,
+  body: string,
+  resolvedAddress: string,
+  family: 4 | 6,
+  signal: AbortSignal,
+  maxBytes: number
+): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(rawUrl);
+    const isHttps = parsed.protocol === "https:";
+    const transport = isHttps ? https : http;
+    const req = transport.request(
+      {
+        hostname: parsed.hostname,
+        port: parsed.port ? Number(parsed.port) : isHttps ? 443 : 80,
+        path: `${parsed.pathname}${parsed.search}`,
+        method: "POST",
+        headers: { ...headers, host: parsed.host },
+        signal,
+        ...(isHttps ? { servername: parsed.hostname } : {}),
+        lookup: (_hostname, _opts, cb) => {
+          cb(null, resolvedAddress, family);
+        },
+      },
+      (res) => {
+        const status = res.statusCode ?? 0;
+        if (status >= 300 && status < 400) {
+          res.resume();
+          reject(new Error(`HTTP redirect blocked (${status})`));
+          return;
+        }
+        const contentLength = res.headers["content-length"];
+        if (contentLength && Number(contentLength) > maxBytes) {
+          res.destroy();
+          reject(new Error(`HTTP response exceeds max size limit (${maxBytes} bytes)`));
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let total = 0;
+        res.on("data", (chunk: Buffer) => {
+          total += chunk.byteLength;
+          if (total > maxBytes) {
+            res.destroy();
+            reject(new Error(`HTTP response exceeds max size limit (${maxBytes} bytes)`));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        res.on("end", () => {
+          const responseHeaders = new Headers();
+          for (const [k, v] of Object.entries(res.headers)) {
+            if (typeof v === "string") responseHeaders.set(k, v);
+            else if (Array.isArray(v)) responseHeaders.set(k, v.join(", "));
+          }
+          resolve(new Response(Buffer.concat(chunks), { status, headers: responseHeaders }));
+        });
+        res.on("error", reject);
+      }
+    );
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
 }
 
 async function readResponseTextBounded(res: Response, maxBytes: number): Promise<string> {
@@ -279,10 +376,14 @@ export async function probeHttpServer(
   if (urlError) {
     return { server: serverName, transport: "http", tools: [], error: urlError };
   }
+  let resolvedPin: { address: string; family: 4 | 6 } | undefined;
   if (fetchImpl === fetch) {
-    const dnsError = await validateResolvedHost(config.url, allowPrivate);
-    if (dnsError) {
-      return { server: serverName, transport: "http", tools: [], error: dnsError };
+    const dnsResult = await validateResolvedHost(config.url, allowPrivate);
+    if (dnsResult.error) {
+      return { server: serverName, transport: "http", tools: [], error: dnsResult.error };
+    }
+    if (dnsResult.address && dnsResult.family) {
+      resolvedPin = { address: dnsResult.address, family: dnsResult.family };
     }
   }
 
@@ -295,22 +396,37 @@ export async function probeHttpServer(
       accept: "application/json, text/event-stream",
       ...(config.headers ?? {}),
     };
+    const postJson = (headers: Record<string, string>, payload: Record<string, unknown>): Promise<Response> => {
+      const body = JSON.stringify(payload);
+      if (resolvedPin) {
+        return pinnedHttpPost(
+          config.url!,
+          headers,
+          body,
+          resolvedPin.address,
+          resolvedPin.family,
+          controller.signal,
+          maxBytes
+        );
+      }
+      return fetchImpl(config.url!, {
+        method: "POST",
+        headers,
+        redirect: "error",
+        signal: controller.signal,
+        body,
+      });
+    };
 
-    const initRes = await fetchImpl(config.url, {
-      method: "POST",
-      headers: baseHeaders,
-      redirect: "error",
-      signal: controller.signal,
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: "2024-11-05",
-          capabilities: {},
-          clientInfo: { name: "mcp-audit", version: PROBE_CLIENT_VERSION },
-        },
-      }),
+    const initRes = await postJson(baseHeaders, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "mcp-audit", version: PROBE_CLIENT_VERSION },
+      },
     });
 
     if (!initRes.ok) {
@@ -343,17 +459,11 @@ export async function probeHttpServer(
       ? { ...baseHeaders, "mcp-session-id": sessionId }
       : baseHeaders;
 
-    const listRes = await fetchImpl(config.url, {
-      method: "POST",
-      headers: sessionHeaders,
-      redirect: "error",
-      signal: controller.signal,
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 2,
-        method: "tools/list",
-        params: {},
-      }),
+    const listRes = await postJson(sessionHeaders, {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+      params: {},
     });
 
     if (!listRes.ok) {
